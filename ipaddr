@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+#
+# ipaddr - print the IP address for the primary route
+#
+# Based on:
+#
+# https://apple.stackexchange.com/questions/20547/how-do-i-find-my-ip-address-from-the-command-line
+#
+# Copyright (c) 2024-2025 by Landon Curt Noll.  All Rights Reserved.
+#
+# Permission to use, copy, modify, and distribute this software and
+# its documentation for any purpose and without fee is hereby granted,
+# provided that the above copyright, this permission notice and text
+# this comment, and the disclaimer below appear in all of the following:
+#
+#       supporting documentation
+#       source copies
+#       source works derived from this source
+#       binaries derived from this source or from derived source
+#
+# LANDON CURT NOLL DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
+# INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO
+# EVENT SHALL LANDON CURT NOLL BE LIABLE FOR ANY SPECIAL, INDIRECT OR
+# CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF
+# USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+# OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+# PERFORMANCE OF THIS SOFTWARE.
+#
+# chongo (Landon Curt Noll, http://www.isthe.com/chongo/index.html) /\oo/\
+#
+# Share and enjoy! :-)
+
+# setup
+#
+export VERSION="1.0.1 2025-04-11"
+NAME=$(basename "$0")
+export NAME
+#
+export V_FLAG=0
+
+# usage
+#
+export USAGE="usage: $0 [-h] [-v level] [-V]
+
+    -h          print help message and exit
+    -v level    set verbosity level (def level: $V_FLAG)
+    -V          print version string and exit
+
+Exit codes:
+     0      all OK
+     2      -h and help string printed or -V and version string printed
+     3      command line error
+     4      neither ipconfig nor ifconfig found
+ >= 10      internal error
+
+$NAME version: $VERSION"
+
+# parse command line
+#
+while getopts :hv:V flag; do
+  case "$flag" in
+    h) echo "$USAGE"
+	exit 2
+	;;
+    v) V_FLAG="$OPTARG"
+	;;
+    V) echo "$VERSION"
+	exit 2
+	;;
+    \?) echo "$0: ERROR: invalid option: -$OPTARG" 1>&2
+	echo 1>&2
+	echo "$USAGE" 1>&2
+	exit 3
+	;;
+    :) echo "$0: ERROR: option -$OPTARG requires an argument" 1>&2
+	echo 1>&2
+	echo "$USAGE" 1>&2
+	exit 3
+	;;
+    *) echo "$0: ERROR: unexpected value from getopts: $flag" 1>&2
+	echo 1>&2
+	echo "$USAGE" 1>&2
+	exit 3
+	;;
+  esac
+done
+if [[ $V_FLAG -ge 1 ]]; then
+    echo "$0: debug[1]: debug level: $V_FLAG" 1>&2
+fi
+#
+# remove the options
+#
+shift $(( OPTIND - 1 ));
+#
+# verify arg count
+#
+if [[ $# -ne 0 ]]; then
+    echo "$0: ERROR: expected 0 args, found: $#" 1>&2
+    echo "$USAGE" 1>&2
+    exit 3
+fi
+
+
+# determine if we have ipconfig
+#
+IPCONFIG=$(type -P ipconfig)
+export IPCONFIG
+
+
+# determine if we have ifconfig
+#
+IFCONFIG=$(type -P ifconfig)
+export IFCONFIG
+
+
+# we just have either ipconfig and/or ifconfig
+#
+if [[ -z $IPCONFIG && -z $IFCONFIG ]]; then
+    echo "$0: ERROR: ipconfig or ifconfig executable tools found" 1>&2
+    exit 4
+fi
+
+
+# print running info if verbose
+#
+# If -v 3 or higher, print exported variables in order that they were exported.
+#
+if [[ $V_FLAG -ge 3 ]]; then
+    echo "$0: debug[3]: VERSION=$VERSION" 1>&2
+    echo "$0: debug[3]: NAME=$NAME" 1>&2
+    echo "$0: debug[3]: V_FLAG=$V_FLAG" 1>&2
+    echo "$0: debug[3]: IPCONFIG=$IPCONFIG" 1>&2
+    echo "$0: debug[3]: IFCONFIG=$IFCONFIG" 1>&2
+fi
+
+
+# print IP address for an active non-broadcast interface
+#
+function interface_ip
+{
+    # parse args
+    #
+    if [[ $# -ne 1 ]]; then
+	echo "$0: ERROR: in interface_ip: expected 1 arg, found $#" 1>&2
+	exit 1
+    fi
+
+    # case: we have ipconfig
+    #
+    if [[ -n $IPCONFIG ]]; then
+
+	# print interface IP address as long as it is not the localhost address
+	#
+	"$IPCONFIG" getifaddr "$1"
+
+    # case: we have ifconfig
+    #
+    else
+	IT=$("$IFCONFIG" "$1")
+	export IT
+
+	# print nothing for non-active interfaces
+	#
+	if [[ "$IT" != *"status: active"* ]]; then
+	    return
+	fi
+
+	# print nothing for broadcast interfaces
+	#
+	if [[ "$IT" != *" broadcast "* ]]; then
+	    return
+	fi
+
+	# print interface IP address as long as it is not the localhost address
+	#
+	echo "$IT" | grep "inet " | grep -v 127.0.0.1 | awk '{print $2}'
+    fi
+}
+
+# determine the interface of the default route
+#
+# As recommended by: https://superuser.com/a/627581/38941
+#
+#
+DEF_ROUTE_INTERFACE=$(route -n get 0.0.0.0 2>/dev/null | awk '/interface: / {print $2}')
+export DEF_ROUTE_INTERFACE
+# However, when the interface is a VPN tunnel with as ipsec0, this will not work.
+if [[ $DEF_ROUTE_INTERFACE =~ ipsec* ]]; then
+    DEF_ROUTE_INTERFACE=""
+fi
+
+# case: We know the default route, so print the IP address
+#
+if [[ -n "$DEF_ROUTE_INTERFACE" ]]; then
+    interface_ip "$DEF_ROUTE_INTERFACE"
+
+# case: print interfaces we have
+#
+else
+    # case: we have ipconfig
+    #
+    if [[ -n $IPCONFIG ]]; then
+	"$IPCONFIG" getiflist | tr ' ' '\012' | while read -r i; do
+	    interface_ip "$i"
+	done
+
+    # case: we have ifconfig -s
+    #
+    elif "$IFCONFIG" -s >/dev/null 2>&1; then
+	for i in $("$IFCONFIG" -s | awk '{print $1}' | awk '{if(NR>1)print}'); do
+	    interface_ip "$i"
+	done
+
+    # case: we try for just ifconfig -s
+    #
+    else
+	for i in $("$IFCONFIG" -a | grep -E '^[^[:space:]]*:' | sed -e 's/:.*//'); do
+	    interface_ip "$i"
+	done
+    fi
+fi
+
+
+# All Done!!! -- Jessica Noll, Age 2
+#
+exit 0
