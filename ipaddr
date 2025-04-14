@@ -1,10 +1,32 @@
 #!/usr/bin/env bash
 #
-# ipaddr - print the IP address for the primary route
+# ipaddr - print the host's IP addresses
 #
-# Based on:
+# We will attempt to determine IP address of this host.  By default we print the IP address of the default
+# route interface, unless `-i inter` is given in which case that specifically named interface is used.
+#
+# If the default route interface cannot be determined (and if `-i inter` is not given),
+# then we will attempt to print all IP addresses for all interfaces.  However, the `-d` command option
+# will force a non-zero exit if the default route interface cannot be determined.
+#
+# By default, only 1 IP address is printed.  However if IP addresses for all interfaces must be
+# processed (because default route interface cannot be determined), then multiple IP addresses
+# may be printed.  However the `-1` command option will force a non-zero exit if more than one
+# IP address would have been printed.
+#
+# By default, we do not print localhost addresses, unless the -0 flag is given.
+#
+# If a given interface has both an IPv4 and IPv6 address, only the IPv4 address is printed.
+#
+# If `-4` is given, only IPv4 address are printed: no IPv6 address are printed.
+# If `-6` given, only IPv6 address are printed.
+#
+###
+#
+# We obtained some ideas from:
 #
 # https://apple.stackexchange.com/questions/20547/how-do-i-find-my-ip-address-from-the-command-line
+# https://linuxhandbook.com/find-ip-address/
 #
 # Copyright (c) 2024-2025 by Landon Curt Noll.  All Rights Reserved.
 #
@@ -30,34 +52,370 @@
 #
 # Share and enjoy! :-)
 
+
+# firewall - run only with a bash that is version 5.1.8 or later
+#
+# The "/usr/bin/env bash" command must result in using a bash that
+# is version 5.1.8 or later.
+#
+# We could relax this version and insist on version 4.2 or later.  Versions
+# of bash between 4.2 and 5.1.7 might work.  However, to be safe, we will require
+# bash version 5.1.8 or later.
+#
+# WHY 5.1.8 and not 4.2?  This safely is done because macOS Homebrew bash we
+# often use is "version 5.2.26(1)-release" or later, and the RHEL Linux bash we
+# use often use is "version 5.1.8(1)-release" or later.  These versions are what
+# we initially tested.  We recommend you either upgrade bash or install a newer
+# version of bash and adjust your $PATH so that "/usr/bin/env bash" finds a bash
+# that is version 5.1.8 or later.
+#
+# NOTE: The macOS shipped, as of 2025 March 15, a version of bash is something like
+#	bash "version 3.2.57(1)-release".  That macOS shipped version of bash
+#	will NOT work.  For users of macOS we recommend you install Homebrew,
+#	(see https://brew.sh), and then run "brew install bash" which will
+#	typically install it into /opt/homebrew/bin/bash, and then arrange your $PATH
+#	so that "/usr/bin/env bash" finds "/opt/homebrew/bin" (or whatever the
+#	Homebrew bash is).
+#
+# NOTE: And while MacPorts might work, we noticed a number of subtle differences
+#	with some of their ported tools to suggest you might be better off
+#	with installing Homebrew (see https://brew.sh).  No disrespect is intended
+#	to the MacPorts team as they do a commendable job.  Nevertheless we ran
+#	into enough differences with MacPorts environments to suggest you
+#	might find a better experience with this tool under Homebrew instead.
+#
+if [[ -z ${BASH_VERSINFO[0]} ||
+	 ${BASH_VERSINFO[0]} -lt 5 ||
+	 ${BASH_VERSINFO[0]} -eq 5 && ${BASH_VERSINFO[1]} -lt 1 ||
+	 ${BASH_VERSINFO[0]} -eq 5 && ${BASH_VERSINFO[1]} -eq 1 && ${BASH_VERSINFO[2]} -lt 8 ]]; then
+    echo "$0: ERROR: bash version needs to be >= 5.1.8: $BASH_VERSION" 1>&2
+    echo "$0: Warning: bash version >= 4.2 might work but 5.1.8 was the minimum we tested" 1>&2
+    echo "$0: Notice: For macOS users: install Homebrew (see https://brew.sh), then run" \
+	 ""brew install bash" and then modify your \$PATH so that \"#!/usr/bin/env bash\"" \
+	 "finds the Homebrew installed (usually /opt/homebrew/bin/bash) version of bash" 1>&2
+    exit 4
+fi
+
+# setup bash file matching
+#
+# We must declare arrays with -ag or -Ag, and we need loops to "export" modified variables.
+# This requires a bash with a version 4.2 or later.  See the larger comment above about bash versions.
+#
+# Example:
+#
+#	unset TOOL_OPTION
+#	declare -ag TOOL_OPTION
+#
+#	TOOL_OPTION+=("-D")
+#	TOOL_OPTION+=("-E")
+#
+#	for index in "${!TOOL_OPTION[@]}"; do
+#	    echo "$0: debug[3]: TOOL_OPTION[$index]=${TOOL_OPTION[$index]}" 1>&2
+#	done
+#
+#	if [[ $V_FLAG -ge 3 ]]; then
+#	    echo "$0: debug[3]: about to: $TOOL ${TOOL_OPTION[*]} -- $YYYY" 1>&2
+#	fi
+#	"$TOOL" "${TOOL_OPTION[@]}" -- "$YYYY"
+#
+shopt -s nullglob	# enable expanded to nothing rather than remaining unexpanded
+shopt -u failglob	# disable error message if no matches are found
+shopt -u dotglob	# disable matching files starting with .
+shopt -u nocaseglob	# disable strict case matching
+shopt -u extglob	# enable extended globbing patterns
+shopt -s globstar	# enable ** to match all files and zero or more directories and subdirectories
+
+# other required bash options
+#
+# Requires bash with a version 4.2 or later
+#
+shopt -s lastpipe       # run last command of a pipeline not executed in the background in the current shell environment
+
+
 # setup
 #
-export VERSION="1.0.1 2025-04-11"
+export VERSION="1.1.0 2025-04-13"
 NAME=$(basename "$0")
 export NAME
 #
 export V_FLAG=0
+export IP=""
+export IP_ADDRESS=""
+export D_FLAG=
+export ONE_FLAG=
+export PRINT_LOCALHOST=
+export IPV4_ONLY=
+export IPV6_ONLY=
+export ONLY_INTERFACE=""
+export CAP_L_FLAG=""
 
 # usage
 #
-export USAGE="usage: $0 [-h] [-v level] [-V]
+export USAGE="usage: $0 [-h] [-v level] [-V] [-d] [-1] [-4] [-6] [-0] [-i inter] [-L]
 
     -h          print help message and exit
     -v level    set verbosity level (def level: $V_FLAG)
     -V          print version string and exit
 
+    -d          print only the default route interface IP address (def: try default route interface, then print all IP interfaces)
+    -1          print only one IP address or nothing (def: try default route interface, then print all IP addresses)
+
+    -0          print localhost IP addresses (def: do not print localhost IP addresses)
+
+    -4          print only IPv4 addresses (def: print both IPv4 and IPv6 IP addresses)
+    -6          print only IPv6 addresses (def: print both IPv4 and IPv6 IP addresses)
+
+                NOTE: -4 and -6 conflict
+
+    -i inter    use only the inter interface (def: try default interface, then use all interfaces)
+    -L          list known interfaces names and exit
+
 Exit codes:
      0      all OK
+     1      no IP addresses could be determined
      2      -h and help string printed or -V and version string printed
      3      command line error
-     4      neither ipconfig nor ifconfig found
+     4      default route interface addresses could not be determined and -d used
+     5      multiple single IP address found and -1 used
+     6      -l used and no interface names could be determined
  >= 10      internal error
 
 $NAME version: $VERSION"
 
+
+# print IP address, if it is not an 127/8 localhost addresses, for an active non-broadcast interface
+#
+# usage:
+#
+#   interface_ip interface
+#
+# output:
+#
+#   IP address for interface or nothing if interface IP information cannot be determined
+#
+function interface_ip
+{
+    local INTERFACE_IP_ADDR;	# IP address obtained
+    local INT_NAME;		# interface name arg
+    local LINE;			# ifconfig line read
+    local LINENUM;		# line number read
+    local FLAGS;		# ifconfig flags (flags=..<flag,flag,...>.. with ,'s turned into spaces)
+
+    # parse args
+    #
+    if [[ $# -ne 1 ]]; then
+	echo "$0: ERROR: in interface_ip: expected 1 arg, found $#" 1>&2
+	exit 1
+    fi
+    INT_NAME="$1"
+    INTERFACE_IP_ADDR=""
+
+    # try ipconfig first is we have ipconfig
+    #
+    if [[ -n $IPCONFIG ]]; then
+
+	# print interface IP address as long as it is not the localhost address
+	#
+	if [[ $V_FLAG -ge 5 ]]; then
+	    echo "$0: debug[5]: about to run: $IPCONFIG getifaddr $INT_NAME" 1>&2
+	fi
+	INTERFACE_IP_ADDR=$("$IPCONFIG" getifaddr "$INT_NAME" 2>/dev/null)
+    fi
+
+    # try ifconfig (assuming we have ifconfig) if ipconfig didn't produce or if we didn't have ipconfig
+    #
+    if [[ -z $INTERFACE_IP_ADDR && -n $IFCONFIG ]]; then
+
+	# process ifconfig output
+	#
+	if [[ $V_FLAG -ge 5 ]]; then
+	    echo "$0: debug[5]: about to run: $IFCONFIG $INT_NAME" 1>&2
+	fi
+	LINENUM=0
+	"$IFCONFIG" "$INT_NAME" 2>/dev/null | while read -r LINE; do
+
+	    # count this line
+	    #
+	    ((++LINENUM))
+	    if [[ $V_FLAG -ge 9 ]]; then
+		echo "$0: debug[9]: read line $LINENUM: $LINE" 1>&2
+	    fi
+
+	    # on first line, look at flags
+	    #
+	    if [[ $LINENUM -eq 1 ]]; then
+
+		# look the interface flags
+		#
+		FLAGS=$(sed -e 's/.*flags=[^<]*<//' -e 's/>.*//' -e 's/,/ /g' <<< "$LINE")
+		if [[ -z $FLAGS ]]; then
+		    if [[ $V_FLAG -ge 9 ]]; then
+			echo "$0: debug[9]: no flags found for interface: $INT_NAME, skipping" 1>&2
+			break
+		    fi
+		fi
+		if [[ $V_FLAG -ge 7 ]]; then
+		    echo "$0: debug[7]: interface $INT_NAME has flags: $FLAGS" 1>&2
+		fi
+
+		# must have an UP flag
+		#
+		if ! grep -w -q UP <<< "$FLAGS"; then
+		    if [[ $V_FLAG -ge 9 ]]; then
+			echo "$0: debug[9]: interface $INT_NAME is not UP, skipping" 1>&2
+		    fi
+		    break
+		fi
+
+		# must have a RUNNING flag
+		#
+		if ! grep -w -q RUNNING <<< "$FLAGS"; then
+		    if [[ $V_FLAG -ge 9 ]]; then
+			echo "$0: debug[9]: interface $INT_NAME is not RUNNING, skipping" 1>&2
+		    fi
+		    break
+		fi
+		if [[ $V_FLAG -ge 7 ]]; then
+		    echo "$0: debug[7]: interface $INT_NAME us UP and RUNNING" 1>&2
+		fi
+		continue
+	    fi
+
+	    # on later lines, look for the inet information
+	    #
+	    if [[ $LINE =~ inet* ]]; then
+
+		# attempt to collect the inet address
+		#
+		if [[ $V_FLAG -ge 9 ]]; then
+		    echo "$0: debug[9]: found inet line for interface $INT_NAME" 1>&2
+		fi
+
+		# unless IPv6 only, process an IPv4 inet line
+		#
+		if [[ -z $IPV6_ONLY ]]; then
+		    INTERFACE_IP_ADDR=$(awk '$1 ~ /inet/ { print $2; }' <<< "$LINE")
+		    if [[ -n $INTERFACE_IP_ADDR ]]; then
+			# without -4 and without -6, an IPv4 address is printed for a given interface
+			break
+		    fi
+		fi
+
+		# unless IPv4 only, process an IPv6 inet6 line (without any trailing %inter text)
+		#
+		if [[ -z $IPV4_ONLY ]]; then
+		    INTERFACE_IP_ADDR=$(awk '$1 ~ /inet6/ { print $2; }' <<< "$LINE" | sed -e 's/%.*//')
+		    if [[ -n $INTERFACE_IP_ADDR ]]; then
+			# with -6, or if the interface only has an IPv6 address, print the IPv6 address
+			break
+		    fi
+		fi
+	    fi
+	done
+    fi
+
+    # case: no -0, to skip local host addresses
+    #
+    if [[ -z $PRINT_LOCALHOST ]]; then
+
+	# reject IPv4 127/8 localhost addresses
+	#
+	if [[ $INTERFACE_IP_ADDR =~ ^127\. ]]; then
+	    if [[ $V_FLAG -ge 5 ]]; then
+		echo "$0: debug[5]: skipping IPv4 localhost on interface $INT_NAME: $INTERFACE_IP_ADDR" 1>&2
+	    fi
+	    INTERFACE_IP_ADDR=""
+	fi
+
+	# reject IPv6 ::1 localhost addresses
+	#
+	if [[ $INTERFACE_IP_ADDR == ::1 ]]; then
+            if [[ $V_FLAG -ge 5 ]]; then
+                echo "$0: debug[5]: skipping IPv6 localhost on interface $INT_NAME: $INTERFACE_IP_ADDR" 1>&2
+            fi
+            INTERFACE_IP_ADDR=""
+        fi
+    fi
+
+    # output IP address if we found one
+    #
+    if [[ -n $INTERFACE_IP_ADDR ]]; then
+	if [[ $V_FLAG -ge 3 ]]; then
+	    echo "$0: debug[3]: interface $INT_NAME IP address: $INTERFACE_IP_ADDR" 1>&2
+	fi
+	echo "$INTERFACE_IP_ADDR"
+    fi
+}
+
+
+# print interface names or print nothing
+#
+# given:
+#
+#   interface_name
+#
+# output:
+#
+#   interface names (one per line) or nothing if no interface names can be determined
+#
+function interface_name
+{
+    # case: we have ipconfig
+    #
+    if [[ -n $IPCONFIG ]]; then
+
+	# return ipconfig getiflist listed interface names
+	if [[ $V_FLAG -ge 5 ]]; then
+	    echo "$0: debug[5]: about to run: $IPCONFIG getiflist" 1>&2
+	fi
+	"$IPCONFIG" getiflist | sed -e 's/  *$//' -e 's/  */\n/g'
+
+    # case: we have ifconfig
+    #
+    elif [[ -n $IFCONFIG ]]; then
+
+	# case: ifconfig -s works
+	if [[ $V_FLAG -ge 7 ]]; then
+	    echo "$0: debug[7]: about to test if this works: $IFCONFIG -s" 1>&2
+	fi
+	if "$IFCONFIG" -s >/dev/null 2>&1; then
+
+	    # return ifconfig -s listed interface names
+	    if [[ $V_FLAG -ge 5 ]]; then
+		echo "$0: debug[5]: about to run: $IFCONFIG -s" 1>&2
+	    fi
+	    "$IFCONFIG" -s | awk '{print $1}' | awk '{if(NR>1)print}'
+	    return
+	fi
+
+	# case: ifconfig -a works
+	#
+	if [[ $V_FLAG -ge 7 ]]; then
+	    echo "$0: debug[7]: about to test if this works: $IFCONFIG -a" 1>&2
+	fi
+	if "$IFCONFIG" -a >/dev/null 2>&1; then
+
+	    # return ifconfig -a listed interface names
+	    if [[ $V_FLAG -ge 5 ]]; then
+		echo "$0: debug[5]: about to run: $IFCONFIG -a" 1>&2
+	    fi
+	    "$IFCONFIG" -a | grep -E '^[^[:space:]]*:' | sed -e 's/:.*//'
+	    return
+	fi
+    fi
+
+    # case: unable to determine any interface names
+    #
+    if [[ $V_FLAG -ge 3 ]]; then
+	echo "$0: debug[3]: unable to determine any interface names" 1>&2
+    fi
+    return
+}
+
+
 # parse command line
 #
-while getopts :hv:V flag; do
+while getopts :hv:Vd1046i:l flag; do
   case "$flag" in
     h) echo "$USAGE"
 	exit 2
@@ -66,6 +424,20 @@ while getopts :hv:V flag; do
 	;;
     V) echo "$VERSION"
 	exit 2
+	;;
+    d) D_FLAG="true"
+	;;
+    1) ONE_FLAG="true"
+	;;
+    0) PRINT_LOCALHOST="true"
+	;;
+    4) IPV4_ONLY="true"
+	;;
+    6) IPV6_ONLY="true"
+	;;
+    i) ONLY_INTERFACE="$OPTARG"
+	;;
+    l) CAP_L_FLAG="true"
 	;;
     \?) echo "$0: ERROR: invalid option: -$OPTARG" 1>&2
 	echo 1>&2
@@ -99,6 +471,20 @@ if [[ $# -ne 0 ]]; then
     echo "$USAGE" 1>&2
     exit 3
 fi
+#
+# -4 and -6 conflict
+#
+if [[ -n $IPV4_ONLY && -n $IPV6_ONLY ]]; then
+    echo "$0: ERROR: use of -4 and -6 conflict" 1>&2
+    echo "$USAGE" 1>&2
+    exit 3
+fi
+
+
+# determine if we have hostname
+#
+HOSTNAME_PROG=$(type -P hostname)
+export HOSTNAME_PROG
 
 
 # determine if we have ipconfig
@@ -113,12 +499,11 @@ IFCONFIG=$(type -P ifconfig)
 export IFCONFIG
 
 
-# we just have either ipconfig and/or ifconfig
+# determine if we have route
 #
-if [[ -z $IPCONFIG && -z $IFCONFIG ]]; then
-    echo "$0: ERROR: ipconfig or ifconfig executable tools found" 1>&2
-    exit 4
-fi
+ROUTE_PROG=$(type -P route)
+export ROUTE_PROG
+
 
 
 # print running info if verbose
@@ -129,98 +514,257 @@ if [[ $V_FLAG -ge 3 ]]; then
     echo "$0: debug[3]: VERSION=$VERSION" 1>&2
     echo "$0: debug[3]: NAME=$NAME" 1>&2
     echo "$0: debug[3]: V_FLAG=$V_FLAG" 1>&2
+    echo "$0: debug[3]: D_FLAG=$D_FLAG" 1>&2
+    echo "$0: debug[3]: ONE_FLAG=$ONE_FLAG" 1>&2
+    echo "$0: debug[3]: PRINT_LOCALHOST=$PRINT_LOCALHOST" 1>&2
+    echo "$0: debug[3]: IPV4_ONLY=$IPV4_ONLY" 1>&2
+    echo "$0: debug[3]: IPV6_ONLY=$IPV6_ONLY" 1>&2
+    echo "$0: debug[3]: ONLY_INTERFACE=$ONLY_INTERFACE" 1>&2
+    echo "$0: debug[3]: CAP_L_FLAG=$CAP_L_FLAG" 1>&2
+    echo "$0: debug[3]: HOSTNAME_PROG=$HOSTNAME_PROG" 1>&2
     echo "$0: debug[3]: IPCONFIG=$IPCONFIG" 1>&2
     echo "$0: debug[3]: IFCONFIG=$IFCONFIG" 1>&2
+    echo "$0: debug[3]: ROUTE_PROG=$ROUTE_PROG" 1>&2
 fi
 
 
-# print IP address for an active non-broadcast interface
+# case: -l used, list interface names and exit
 #
-function interface_ip
-{
-    # parse args
+if [[ -n $CAP_L_FLAG ]]; then
+
+    # try to list interface names
     #
-    if [[ $# -ne 1 ]]; then
-	echo "$0: ERROR: in interface_ip: expected 1 arg, found $#" 1>&2
-	exit 1
+    if [[ $V_FLAG -ge 3 ]]; then
+	echo "$0: debug[3]: due to -l, about to run: interface_name" 1>&2
+    fi
+    INTERFACE_SET=$(interface_name)
+    export INTERFACE_SET
+    if [[ -z $INTERFACE_SET ]]; then
+	echo "$0: ERROR: -l used and no interface names could be determined" 1>&2
+	exit 6
     fi
 
-    # case: we have ipconfig
+    # output interface names
     #
-    if [[ -n $IPCONFIG ]]; then
-
-	# print interface IP address as long as it is not the localhost address
-	#
-	"$IPCONFIG" getifaddr "$1"
-
-    # case: we have ifconfig
-    #
-    else
-	IT=$("$IFCONFIG" "$1")
-	export IT
-
-	# print nothing for non-active interfaces
-	#
-	if [[ "$IT" != *"status: active"* ]]; then
-	    return
-	fi
-
-	# print nothing for broadcast interfaces
-	#
-	if [[ "$IT" != *" broadcast "* ]]; then
-	    return
-	fi
-
-	# print interface IP address as long as it is not the localhost address
-	#
-	echo "$IT" | grep "inet " | grep -v 127.0.0.1 | awk '{print $2}'
+    if [[ $V_FLAG -ge 1 ]]; then
+	echo "$0: debug[1]: output interface names" 1>&2
     fi
-}
+    sed -E -e 's/[[:space:]]+$//' -e 's/[[:space:]]+/\n/g' <<< "$INTERFACE_SET"
+    exit 0
+fi
 
-# determine the interface of the default route
+
+# case: using -i inter, only use this interface
+#
+if [[ -n $ONLY_INTERFACE ]]; then
+
+    # try to determine the IP address of the only interface we care about
+    #
+    if [[ $V_FLAG -ge 3 ]]; then
+	echo "$0: debug[3]: about to run: interface_ip $ONLY_INTERFACE" 1>&2
+    fi
+    IP_ADDRESS=$(interface_ip "$ONLY_INTERFACE")
+
+    # output interface we care about IP address if we can
+    #
+    if [[ -n $IP_ADDRESS ]]; then
+	if [[ $V_FLAG -ge 1 ]]; then
+	    echo "$0: debug[1]: output IP address for just this interface: $ONLY_INTERFACE" 1>&2
+	fi
+	# output the IP address of the only interface we care about
+	sed -E -e 's/[[:space:]]+$//' -e 's/[[:space:]]+/\n/g' <<< "$IP_ADDRESS"
+	# We have an IP addresses, no need to try other commands
+	exit 0
+    fi
+
+    # case: no IP addresses found or determined for the only interface we care about
+    #
+    echo "$0: ERROR: unable to determine IP address for interface: $ONLY_INTERFACE" 1>&2
+    exit 1
+fi
+
+
+# unless we are using -i inter, determine the interface of the default route
 #
 # As recommended by: https://superuser.com/a/627581/38941
 #
-#
-DEF_ROUTE_INTERFACE=$(route -n get 0.0.0.0 2>/dev/null | awk '/interface: / {print $2}')
-export DEF_ROUTE_INTERFACE
-# However, when the interface is a VPN tunnel with as ipsec0, this will not work.
-if [[ $DEF_ROUTE_INTERFACE =~ ipsec* ]]; then
-    DEF_ROUTE_INTERFACE=""
-fi
-
-# case: We know the default route, so print the IP address
-#
-if [[ -n "$DEF_ROUTE_INTERFACE" ]]; then
-    interface_ip "$DEF_ROUTE_INTERFACE"
-
-# case: print interfaces we have
-#
-else
-    # case: we have ipconfig
-    #
-    if [[ -n $IPCONFIG ]]; then
-	"$IPCONFIG" getiflist | tr ' ' '\012' | while read -r i; do
-	    interface_ip "$i"
-	done
-
-    # case: we have ifconfig -s
-    #
-    elif "$IFCONFIG" -s >/dev/null 2>&1; then
-	for i in $("$IFCONFIG" -s | awk '{print $1}' | awk '{if(NR>1)print}'); do
-	    interface_ip "$i"
-	done
-
-    # case: we try for just ifconfig -s
-    #
-    else
-	for i in $("$IFCONFIG" -a | grep -E '^[^[:space:]]*:' | sed -e 's/:.*//'); do
-	    interface_ip "$i"
-	done
+export DEF_ROUTE_INTERFACE=""
+if [[ -z $ONLY_INTERFACE ]]; then
+    if [[ -n $ROUTE_PROG ]]; then
+	if [[ $V_FLAG -ge 3 ]]; then
+	    echo "$0: debug[3]: about to run: $ROUTE_PROG n get 0.0.0.0" 1>&2
+	fi
+	DEF_ROUTE_INTERFACE=$("$ROUTE_PROG" -n get 0.0.0.0 2>/dev/null | awk '/interface: / {print $2}')
     fi
 fi
 
 
-# All Done!!! -- Jessica Noll, Age 2
+# case: We have a default route
 #
-exit 0
+if [[ -n $DEF_ROUTE_INTERFACE ]]; then
+
+    # try to determine the IP address of the default route interface
+    #
+    if [[ $V_FLAG -ge 3 ]]; then
+	echo "$0: debug[3]: about to run: interface_ip $DEF_ROUTE_INTERFACE" 1>&2
+    fi
+    IP_ADDRESS=$(interface_ip "$DEF_ROUTE_INTERFACE")
+fi
+# check if the default route
+if [[ -n $IP_ADDRESS ]]; then
+    if [[ $V_FLAG -ge 1 ]]; then
+	echo "$0: debug[1]: output IP address for default interface: $ONLY_INTERFACE" 1>&2
+    fi
+    # output the IP address of the default route interface
+    sed -E -e 's/[[:space:]]+$//' -e 's/[[:space:]]+/\n/g' <<< "$IP_ADDRESS"
+    # We have an IP addresses, no need to try other commands
+    exit 0
+fi
+
+
+# case: -d - print only default route IP address
+#
+if [[ $D_FLAG ]]; then
+    echo "$0: ERROR: -d used and no default route IP address found" 1>&2
+    exit 4
+fi
+
+
+# case: we cannot use default route information (perhaps because it is not set), so print all non-local IP addrs
+#
+if [[ $V_FLAG -ge 3 ]]; then
+    echo "$0: debug[3]: about to run: interface_name" 1>&2
+fi
+INTERFACE_SET=$(interface_name)
+export INTERFACE_SET
+IP_ADDRESS=""
+if [[ -n $INTERFACE_SET ]]; then
+
+    # attempt to collect IP addresses for each interface
+    #
+    for interface in $INTERFACE_SET; do
+
+	# attempt to collect IP address for an interface
+	#
+	if [[ $V_FLAG -ge 5 ]]; then
+	    echo "$0: debug[5]: about to run: interface_ip $interface" 1>&2
+	fi
+	IP=$(interface_ip "$interface")
+	if [[ -n $IP ]]; then
+	    if [[ -z $IP_ADDRESS ]]; then
+		# first IP address found
+		if [[ $V_FLAG -ge 5 ]]; then
+		    echo "$0: debug[5]: for interface $interface, found 1st IP address: $IP" 1>&2
+		fi
+		IP_ADDRESS="$IP"
+	    else
+		# a subsequent IP address found
+		if [[ -z $ONE_FLAG ]]; then
+		    if [[ $V_FLAG -ge 5 ]]; then
+			echo "$0: debug[5]: for interface $interface, found another IP address: $IP" 1>&2
+		    fi
+		    IP_ADDRESS="$IP_ADDRESS $IP"
+		else
+		    echo "$0: ERROR: -1 used, no default route IP address, multiple IP addresses found" 1>&2
+		    exit 5
+		fi
+	    fi
+	fi
+    done
+fi
+if [[ -n $IP_ADDRESS ]]; then
+    if [[ $V_FLAG -ge 1 ]]; then
+	echo "$0: debug[1]: output the IP address(s) found"
+    fi
+    # output the IP address for all interfaces
+    sed -E -e 's/[[:space:]]+$//' -e 's/[[:space:]]+/\n/g' <<< "$IP_ADDRESS"
+    # We have an IP addresses, no need to try other commands
+    exit 0
+fi
+
+
+# try: hostname -I
+#
+# If hostname -I works, then use that result
+#
+IP_ADDRESS=""
+if [[ -x $HOSTNAME_PROG ]]; then
+
+    # use the hostname -I output if all else has failed
+    #
+    if [[ $V_FLAG -ge 3 ]]; then
+	echo "$0: debug[3]: the usual commands failed to produce IP addresses so far" 1>&2
+	echo "$0: debug[3]: about to run: $HOSTNAME_PROG -I" 1>&2
+    fi
+    "$HOSTNAME_PROG" -I 2>/dev/null |
+	sed -E -e 's/[[:space:]]+$//' -e 's/[[:space:]]+/\n/g' |
+	while read -r IP; do
+
+	    # attempt to collect the IP address
+	    #
+	    if [[ $V_FLAG -ge 9 ]]; then
+		echo "$0: debug[9]: $HOSTNAME_PROG -I returned IP address: $IP" 1>&2
+	    fi
+
+	    # case: no -0, to skip local host addresses
+	    #
+	    if [[ -z $PRINT_LOCALHOST ]]; then
+
+		# reject IPv4 127/8 localhost addresses
+		#
+		if [[ $IP =~ ^127\. ]]; then
+		    if [[ $V_FLAG -ge 5 ]]; then
+			echo "$0: debug[5]: skipping IPv4 localhost from $HOSTNAME_PROG -I: $IP" 1>&2
+		    fi
+		    IP=""
+		    continue
+		fi
+
+		# reject IPv6 ::1 localhost addresses
+		#
+		if [[ $IP == ::1 ]]; then
+		    if [[ $V_FLAG -ge 5 ]]; then
+			echo "$0: debug[5]: skipping IPv6 localhost from $HOSTNAME_PROG -I: $IP" 1>&2
+		    fi
+		    IP=""
+		    continue
+		fi
+	    fi
+
+	    # collect the IP address
+	    #
+	    if [[ -z $IP_ADDRESS ]]; then
+		# first IP address found
+		if [[ $V_FLAG -ge 5 ]]; then
+		    echo "$0: debug[5]: for $HOSTNAME_PROG -I, found 1st IP address: $IP" 1>&2
+		fi
+		IP_ADDRESS="$IP"
+	    else
+		# a subsequent IP address found
+		if [[ -z $ONE_FLAG ]]; then
+		    if [[ $V_FLAG -ge 5 ]]; then
+			echo "$0: debug[5]: for $HOSTNAME_PROG -I, found another IP address: $IP" 1>&2
+		    fi
+		    IP_ADDRESS="$IP_ADDRESS $IP"
+		else
+		    echo "$0: ERROR: -1 used, $HOSTNAME_PROG -I returned multiple IP addresses" 1>&2
+		    exit 5
+		fi
+	    fi
+	done
+fi
+if [[ -n $IP_ADDRESS ]]; then
+    if [[ $V_FLAG -ge 1 ]]; then
+	echo "$0: debug[1]: output the IP address(s) found via hostname -I"
+    fi
+    # quick return: hostname -I produced IP addresses
+    sed -E -e 's/[[:space:]]+$//' -e 's/[[:space:]]+/\n/g' <<< "$IP_ADDRESS"
+    # We have an IP addresses, no need to try other commands
+    exit 0
+fi
+
+
+# case: no IP addresses found or determined
+#
+echo "$0: ERROR: unable to determine any IP addresses" 1>&2
+exit 1
