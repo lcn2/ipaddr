@@ -29,7 +29,7 @@ sudo make install
 ```
 
 
-# Examples
+# Example(s)
 
 ```sh
 $ /usr/local/bin/ipaddr
@@ -51,7 +51,7 @@ fe80::cc81:bfe:face:c0a
     -v level    set verbosity level (def level: 0)
     -V          print version string and exit
 
-    -d          print only the default route interface IP address (def: try default route interface, then print all interfaces)
+    -d          print only the default route interface IP address (def: try default route interface, then print all IP interfaces)
     -1          print only one IP address or nothing (def: try default route interface, then print all IP addresses)
 
     -0          print localhost IP addresses (def: do not print localhost IP addresses)
