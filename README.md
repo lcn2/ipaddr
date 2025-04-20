@@ -29,7 +29,7 @@ sudo make install
 ```
 
 
-# Example(s)
+# Examples
 
 ```sh
 $ /usr/local/bin/ipaddr
